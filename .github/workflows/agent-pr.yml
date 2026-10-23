@@ -1,6 +1,7 @@
 name: agent-pr
-# Opens a PR as the App, so the requester can approve it in self-approve zones.
-# The App key lives only in the agent-pr environment, which only main can use.
+# GitHub does not let a PR author approve their own PR.
+# This workflow opens the PR as a GitHub App, so the requester can approve it
+# in their own folders from .github/self-approve.json.
 on:
   workflow_dispatch:
     inputs:
@@ -14,41 +15,74 @@ permissions: {}
 jobs:
   open:
     runs-on: ubuntu-latest
+    # The App key is only in this environment, and only main can use it.
     environment: agent-pr
+    env:
+      BRANCH: ${{ inputs.branch }}
+      # On a re-run, github.actor stays the first requester. triggering_actor is who started this run.
+      REQUESTER: ${{ github.triggering_actor }}
     steps:
+      - name: Check branch name
+        run: |
+          [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ && "$BRANCH" != *..* ]] || { echo "::error::Invalid branch name"; exit 1; }
+
       # Pinned by SHA: this action gets the App private key.
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app
         with:
           client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
-      - name: Copy branch to bot/ and open PR as the App
+
+      - name: List files changed against main
+        id: diff
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          BRANCH: ${{ inputs.branch }}
-          TITLE: ${{ inputs.title }}
-          # triggering_actor, not actor: on a re-run, actor stays the first requester.
-          ACTOR: ${{ github.triggering_actor }}
         run: |
-          [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ && "$BRANCH" != *..* ]] || { echo "::error::Invalid branch name"; exit 1; }
           sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$BRANCH" --jq .sha)
-          # Check zones here too: a guard result belongs to a SHA, and a human PR can give an out-of-zone SHA a pass.
-          compare=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha")
-          # compare lists at most 300 files.
-          [ "$(jq '.files | length' <<<"$compare")" -lt 300 ] || { echo "::error::Too many files"; exit 1; }
-          rules=$(gh api -H "Accept: application/vnd.github.raw" "repos/$GITHUB_REPOSITORY/contents/.github/self-approve.json?ref=main")
-          # A folder must end with "/", so "docs/" does not match "docs-x/".
-          jq -e --arg u "$ACTOR" --argjson rules "$rules" '
-            ($rules[$u] // []) as $dirs
-            | ($dirs | length > 0 and all(endswith("/")))
-              and ([.files[] | .filename, (.previous_filename // empty)]
-                   | all(. as $f | $dirs | any(. as $d | $f | startswith($d))))' <<<"$compare" >/dev/null \
-            || { echo "::error::$ACTOR may not self-approve these files"; exit 1; }
-          ref="bot/$BRANCH"
-          # The App must move the PR head ref itself, so the last push is not the requester's.
-          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$ref" -f sha="$sha" -F force=true \
-            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$ref" -f sha="$sha"
-          if [ -z "$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=${GITHUB_REPOSITORY_OWNER}:$ref&state=open" --jq '.[0].number')" ]; then
-            gh api -X POST "repos/$GITHUB_REPOSITORY/pulls" -f head="$ref" -f base=main -f title="$TITLE" \
-              -f body="Requested by: $ACTOR" --jq .html_url
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # Old paths of renamed files count too.
+          gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" \
+            --jq '.files[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed-files.txt"
+          # compare returns at most 300 files, so a bigger diff could hide files.
+          [ "$(wc -l < "$RUNNER_TEMP/changed-files.txt")" -lt 300 ] || { echo "::error::Too many files"; exit 1; }
+
+      # Check before the branch moves: a guard result belongs to a commit, not to a PR.
+      - name: Check that the requester may self-approve every file
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          gh api -H "Accept: application/vnd.github.raw" "repos/$GITHUB_REPOSITORY/contents/.github/self-approve.json?ref=main" \
+            | jq -r --arg user "$REQUESTER" '.[$user] // [] | .[]' > "$RUNNER_TEMP/allowed-folders.txt"
+          while read -r file; do
+            allowed=false
+            while read -r folder; do
+              # A folder must end with "/", so "docs/" does not match "docs-x/".
+              if [[ "$folder" == */ && "$file" == "$folder"* ]]; then allowed=true; fi
+            done < "$RUNNER_TEMP/allowed-folders.txt"
+            if [ "$allowed" = false ]; then
+              echo "::error::$REQUESTER may not self-approve all changed files"
+              echo "Not allowed: $file"
+              exit 1
+            fi
+          done < "$RUNNER_TEMP/changed-files.txt"
+
+      # The App moves the branch, so the requester is not the last pusher and can approve.
+      - name: Point bot/<branch> at the checked commit
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SHA: ${{ steps.diff.outputs.sha }}
+        run: |
+          # Update the branch, or create it on the first run.
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/bot/$BRANCH" -f sha="$SHA" -F force=true \
+            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/bot/$BRANCH" -f sha="$SHA"
+
+      - name: Open the PR if it is not open yet
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          open=$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=$GITHUB_REPOSITORY_OWNER:bot/$BRANCH&state=open" --jq length)
+          if [ "$open" = 0 ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/pulls" -f head="bot/$BRANCH" -f base=main -f title="$TITLE" \
+              -f body="Requested by: $REQUESTER" --jq .html_url
           fi
