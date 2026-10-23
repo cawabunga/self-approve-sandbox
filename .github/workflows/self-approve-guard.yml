@@ -1,0 +1,24 @@
+name: self-approve-guard
+# pull_request_target runs this file from the base branch, so a PR cannot change the check.
+# Do not checkout PR code here.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+permissions:
+  pull-requests: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: App PRs change only self-approve zones
+        if: github.event.pull_request.user.login == 'cawabunga-self-approve[bot]'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # previous_filename catches renames out of a zone.
+          outside=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)' | grep -Ev '^docs/' || true)
+          if [ -n "$outside" ]; then
+            echo "::error::App PR changes files outside self-approve zones:"; echo "$outside"; exit 1
+          fi

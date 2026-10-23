@@ -1,0 +1,4 @@
+# Broad ownership, like 1click/ in the monorepo.
+* @cawabunga
+# Self-approve zone: only users trusted for it.
+/docs/ @cawabunga
