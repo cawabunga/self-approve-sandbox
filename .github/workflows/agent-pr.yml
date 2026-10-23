@@ -1,0 +1,39 @@
+name: agent-pr
+# Opens a PR as the App, so the requester can approve it in self-approve zones.
+# The App key lives only in the agent-pr environment, which only main can use.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Source branch, already pushed
+        required: true
+      title:
+        description: PR title
+        required: true
+permissions: {}
+jobs:
+  open:
+    runs-on: ubuntu-latest
+    environment: agent-pr
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - name: Copy branch to bot/ and open PR as the App
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BRANCH: ${{ inputs.branch }}
+          TITLE: ${{ inputs.title }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$BRANCH" --jq .sha)
+          ref="bot/$BRANCH"
+          # The App must move the PR head ref itself, so the last push is not the requester's.
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$ref" -f sha="$sha" -F force=true \
+            || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$ref" -f sha="$sha"
+          if [ -z "$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=${GITHUB_REPOSITORY_OWNER}:$ref&state=open" --jq '.[0].number')" ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/pulls" -f head="$ref" -f base=main -f title="$TITLE" \
+              -f body="Requested by: $ACTOR" --jq .html_url
+          fi
