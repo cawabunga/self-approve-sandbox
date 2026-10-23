@@ -5,6 +5,7 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
 permissions:
+  contents: read
   pull-requests: read
 jobs:
   guard:
@@ -16,6 +17,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           CHANGED: ${{ github.event.pull_request.changed_files }}
+          BASE: ${{ github.event.pull_request.base.ref }}
         run: |
           # The files API lists at most 3000 files, so a bigger PR could hide files.
           [ "$CHANGED" -lt 3000 ] || { echo "::error::Too many files"; exit 1; }
@@ -23,7 +25,10 @@ jobs:
           # previous_filename catches renames out of a zone.
           files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
             --jq '.[] | .filename, (.previous_filename // empty)')
-          outside=$(grep -Ev '^docs/' <<<"$files" || true)
+          # Zones of all users: agent-pr already checked the requester's own zones.
+          dirs=$(gh api -H "Accept: application/vnd.github.raw" "repos/$GITHUB_REPOSITORY/contents/.github/self-approve.json?ref=$BASE" \
+            | jq -c '[.[][] | select(endswith("/"))]')
+          outside=$(jq -rR --argjson dirs "$dirs" 'select(. as $f | $dirs | any(. as $d | $f | startswith($d)) | not)' <<<"$files")
           if [ -n "$outside" ]; then
             echo "::error::App PR changes files outside self-approve zones"
             # File names come from the PR author. Stop workflow commands so a name like "::x::" is only text.

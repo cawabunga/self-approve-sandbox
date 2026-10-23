@@ -27,7 +27,8 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           BRANCH: ${{ inputs.branch }}
           TITLE: ${{ inputs.title }}
-          ACTOR: ${{ github.actor }}
+          # triggering_actor, not actor: on a re-run, actor stays the first requester.
+          ACTOR: ${{ github.triggering_actor }}
         run: |
           [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ && "$BRANCH" != *..* ]] || { echo "::error::Invalid branch name"; exit 1; }
           sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$BRANCH" --jq .sha)
@@ -35,9 +36,14 @@ jobs:
           compare=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha")
           # compare lists at most 300 files.
           [ "$(jq '.files | length' <<<"$compare")" -lt 300 ] || { echo "::error::Too many files"; exit 1; }
-          if jq -r '.files[] | .filename, (.previous_filename // empty)' <<<"$compare" | grep -qEv '^docs/'; then
-            echo "::error::Branch changes files outside self-approve zones"; exit 1
-          fi
+          rules=$(gh api -H "Accept: application/vnd.github.raw" "repos/$GITHUB_REPOSITORY/contents/.github/self-approve.json?ref=main")
+          # A folder must end with "/", so "docs/" does not match "docs-x/".
+          jq -e --arg u "$ACTOR" --argjson rules "$rules" '
+            ($rules[$u] // []) as $dirs
+            | ($dirs | length > 0 and all(endswith("/")))
+              and ([.files[] | .filename, (.previous_filename // empty)]
+                   | all(. as $f | $dirs | any(. as $d | $f | startswith($d))))' <<<"$compare" >/dev/null \
+            || { echo "::error::$ACTOR may not self-approve these files"; exit 1; }
           ref="bot/$BRANCH"
           # The App must move the PR head ref itself, so the last push is not the requester's.
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$ref" -f sha="$sha" -F force=true \
