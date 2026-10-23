@@ -15,10 +15,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          CHANGED: ${{ github.event.pull_request.changed_files }}
         run: |
+          # The files API lists at most 3000 files, so a bigger PR could hide files.
+          [ "$CHANGED" -lt 3000 ] || { echo "::error::Too many files"; exit 1; }
+          # Separate command: an API error must fail the job, not give an empty list.
           # previous_filename catches renames out of a zone.
-          outside=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
-            --jq '.[] | .filename, (.previous_filename // empty)' | grep -Ev '^docs/' || true)
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          outside=$(grep -Ev '^docs/' <<<"$files" || true)
           if [ -n "$outside" ]; then
             echo "::error::App PR changes files outside self-approve zones"
             # File names come from the PR author. Stop workflow commands so a name like "::x::" is only text.
