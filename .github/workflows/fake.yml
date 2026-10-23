@@ -1,0 +1,7 @@
+name: fake
+on: pull_request
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 60
