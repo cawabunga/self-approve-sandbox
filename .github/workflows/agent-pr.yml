@@ -11,7 +11,8 @@ on:
       title:
         description: PR title
         required: true
-permissions: {}
+permissions:
+  contents: read
 jobs:
   open:
     runs-on: ubuntu-latest
@@ -41,29 +42,30 @@ jobs:
           sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$BRANCH" --jq .sha)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           # Old paths of renamed files count too.
-          gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" \
+          gh api "repos/$GITHUB_REPOSITORY/compare/refs/heads/main...$sha" \
             --jq '.files[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed-files.txt"
           # compare returns at most 300 files, so a bigger diff could hide files.
           [ "$(wc -l < "$RUNNER_TEMP/changed-files.txt")" -lt 300 ] || { echo "::error::Too many files"; exit 1; }
 
-      # Check before the branch moves: a guard result belongs to a commit, not to a PR.
+      - name: Checkout the self-approve list from main
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: refs/heads/main
+          sparse-checkout: .github/self-approve.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      # The only check. It is enough because the bot/** ruleset lets only the App move bot/ branches.
       - name: Check that the requester may self-approve every file
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
-          gh api -H "Accept: application/vnd.github.raw" "repos/$GITHUB_REPOSITORY/contents/.github/self-approve.json?ref=main" \
-            | jq -r --arg user "$REQUESTER" '.[$user] // [] | .[]' > "$RUNNER_TEMP/allowed-folders.txt"
-          while read -r file; do
-            allowed=false
-            while read -r folder; do
-              # A folder must end with "/", so "docs/" does not match "docs-x/".
-              if [[ "$folder" == */ && "$file" == "$folder"* ]]; then allowed=true; fi
+          jq -r --arg user "$REQUESTER" '.[$user] // [] | .[]' .github/self-approve.json > "$RUNNER_TEMP/allowed-folders.txt"
+          while IFS= read -r file; do
+            while IFS= read -r folder; do
+              if [[ "$file" == "$folder/"* ]]; then continue 2; fi
             done < "$RUNNER_TEMP/allowed-folders.txt"
-            if [ "$allowed" = false ]; then
-              echo "::error::$REQUESTER may not self-approve all changed files"
-              echo "Not allowed: $file"
-              exit 1
-            fi
+            echo "::error::$REQUESTER may not self-approve all changed files"
+            echo "Not allowed: $file"
+            exit 1
           done < "$RUNNER_TEMP/changed-files.txt"
 
       # The App moves the branch, so the requester is not the last pusher and can approve.
@@ -72,7 +74,6 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           SHA: ${{ steps.diff.outputs.sha }}
         run: |
-          # Update the branch, or create it on the first run.
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/bot/$BRANCH" -f sha="$SHA" -F force=true \
             || gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/bot/$BRANCH" -f sha="$SHA"
 
