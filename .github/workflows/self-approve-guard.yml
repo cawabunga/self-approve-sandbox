@@ -20,5 +20,9 @@ jobs:
           outside=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
             --jq '.[] | .filename, (.previous_filename // empty)' | grep -Ev '^docs/' || true)
           if [ -n "$outside" ]; then
-            echo "::error::App PR changes files outside self-approve zones:"; echo "$outside"; exit 1
+            echo "::error::App PR changes files outside self-approve zones"
+            # File names come from the PR author. Stop workflow commands so a name like "::x::" is only text.
+            stop=$(openssl rand -hex 16)
+            echo "::stop-commands::$stop"; echo "$outside"; echo "::$stop::"
+            exit 1
           fi
